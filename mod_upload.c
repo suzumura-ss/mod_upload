@@ -16,11 +16,11 @@
 #define DISABLED  (0)
 #define ENABLED   (1)
 
-#define UPLOAD    "X-Direct-Upload-File"
-static const char VERSION[] = "mod_direct_upload/0.1";
-static const char DIRECT_UPLOAD[] = UPLOAD;
+#define UPLOAD    "X-Upload-File"
+static const char VERSION[] = "mod_upload/0.1";
+static const char X_UPLOAD[] = UPLOAD;
 
-module AP_MODULE_DECLARE_DATA direct_upload_module;
+module AP_MODULE_DECLARE_DATA upload_module;
 
 #define AP_LOG_DEBUG(rec, fmt, ...) ap_log_rerror(APLOG_MARK, APLOG_DEBUG,  0, rec, fmt, ##__VA_ARGS__)
 #define AP_LOG_INFO(rec, fmt, ...)  ap_log_rerror(APLOG_MARK, APLOG_INFO,   0, rec, "[upload] " fmt, ##__VA_ARGS__)
@@ -87,8 +87,6 @@ static apr_file_t* save_to_file(request_rec* rec, apr_off_t* read_bytes)
   }
   AP_LOG_DEBUG(rec, "  Save to %s", tmpl);
   ap_rprintf(rec, "Saving to %s.\n", tmpl);
-  apr_file_remove("/tmp/save_file", rec->pool);
-  link(tmpl, "/tmp/save_file");
 
   // save to file.
   bb = apr_brigade_create(rec->pool, rec->connection->bucket_alloc);
@@ -124,7 +122,7 @@ static apr_file_t* save_to_file(request_rec* rec, apr_off_t* read_bytes)
 // Direct upload handler
 static int direct_upload_handler(request_rec *rec)
 {
-  upload_conf* conf = (upload_conf*)ap_get_module_config(rec->per_dir_config, &direct_upload_module);
+  upload_conf* conf = (upload_conf*)ap_get_module_config(rec->per_dir_config, &upload_module);
   const char* hdr;
   apr_file_t* file = NULL;
   apr_off_t read_bytes = 0;
@@ -177,19 +175,18 @@ static void* config_create(apr_pool_t* p, char* path)
 }
 
 static const command_rec config_cmds[] = {
-  AP_INIT_TAKE1("DirectUpload", ap_set_string_slot, (void*)APR_OFFSETOF(upload_conf, base), OR_FILEINFO, "Upload path."),
+  AP_INIT_TAKE1("Upload", ap_set_string_slot, (void*)APR_OFFSETOF(upload_conf, base), OR_FILEINFO, "Upload path."),
   { NULL },
 };
 
 static void register_hooks(apr_pool_t *p)
 {
   ap_hook_handler(direct_upload_handler, NULL, NULL, APR_HOOK_MIDDLE);
-  ap_hook_fixups(dump_headers, NULL, NULL, APR_HOOK_MIDDLE);
-  //ap_hook_access_checker(direct_upload_handler, NULL, NULL, APR_HOOK_MIDDLE);
+  // ap_hook_fixups(dump_headers, NULL, NULL, APR_HOOK_MIDDLE);
 }
 
 /* Dispatch list for API hooks */
-module AP_MODULE_DECLARE_DATA direct_upload_module = {
+module AP_MODULE_DECLARE_DATA upload_module = {
   STANDARD20_MODULE_STUFF, 
   config_create, /* create per-dir    config structures */
   NULL,          /* merge  per-dir    config structures */
