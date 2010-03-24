@@ -1,0 +1,13 @@
+mod_upload 0.01
+
+This module adds upload handler to Apache/2.x.
+
+To install:
+  # apxs -i -c -Wc,-Wall -Wc,-g -Wc,-O2 mod_upload.c
+
+To enable the module:
+  SetHandler Upload
+  Upload on
+  Upload_base /url_from /filesystem_to
+
+  For example, see upload.conf for OpenSolaris.
