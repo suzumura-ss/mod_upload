@@ -15,4 +15,4 @@ install:: $(SRC) $(HEADERS)
 	$(APXS) -i -c $(APXS_FLAGS) $(SRC)
 
 clean:
-	@rm $(TARGET:slo=*o) $(TARGET:slo=*a)
+	@rm -f $(TARGET:slo=*o) $(TARGET:slo=*a)

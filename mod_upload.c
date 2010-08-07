@@ -293,6 +293,7 @@ static apr_status_t directory_mvdir(request_rec* rec,\
   const char* to_dir;
   char* fbase, *fname, *tbase, *tname;
   apr_status_t status;
+  apr_finfo_t finfo;
   int u;
 
   if((from_dir==NULL) || (_to_dir==NULL)) return APR_EBADPATH;
@@ -305,6 +306,11 @@ static apr_status_t directory_mvdir(request_rec* rec,\
     return EACCES;
   }
 
+  // check from_dir.
+  if((status=apr_stat(&finfo, from_dir, APR_FINFO_TYPE, rec->pool))!=APR_SUCCESS) return status;
+  if(finfo.filetype!=APR_DIR) return ENOTDIR;
+
+  // build path names.
   fbase = apr_pstrdup(rec->pool, from_dir);
   if(normalize_pathname(rec, &fbase)!=APR_SUCCESS) return APR_EBADPATH;
   if(*(fname=split_pathname(fbase))=='\0') return APR_EBADPATH;
