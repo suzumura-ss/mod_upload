@@ -1,4 +1,4 @@
-mod_upload 0.3
+mod_upload 0.3.1
 
 This module adds upload handler to Apache/2.x.
 
@@ -48,5 +48,6 @@ Usage:
     or
       (PUT|POST) /url_from/path_to_dir1/
       X-Upload-DirCtrl: mvdir;/url_from/path_to_dir2/;775
-    '775' is directory permission.
+    '775' is recursive permission.
+    '0775|0111'(+x) for directory, '0775&0666'(-x) for reguler files.
     Return "301 Moved Permanently" when succeed.

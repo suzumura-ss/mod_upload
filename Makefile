@@ -1,5 +1,6 @@
 APXS=apxs
-APXS_FLAGS=-Wc,-Wall -Wc,-g -Wc,-O3 -Wl,-lcurl
+# APXS_FLAGS=-Wc,-Wall -Wc,-g -Wc,-O3 -Wl,-lcurl
+APXS_FLAGS=-Wc,-Wall -Wc,-g -Wc,-O0 -Wl,-lcurl
 
 TARGET=mod_upload.slo
 SRC=mod_upload.c

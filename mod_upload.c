@@ -24,6 +24,7 @@
 #include "apr_lib.h"
 #include "apr_strings.h"
 #include "apr_tables.h"
+#include "apr_file_info.h"
 #include "apr_file_io.h"
 #include "ap_mpm.h"
 #include <unistd.h>
@@ -50,7 +51,7 @@ module AP_MODULE_DECLARE_DATA upload_module;
 #define AP_LOG_ERR(rec, fmt, ...) ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, rec, "[upload] " fmt, ##__VA_ARGS__)
 #define AP_ERR_RESPONSE(rec, fmt, ...) \
                 ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, rec, "[upload] " fmt, ##__VA_ARGS__); \
-                ap_rprintf(rec, fmt, ##__VA_ARGS__)
+                ap_rprintf(rec, fmt "\n", ##__VA_ARGS__)
  
 // Config store.
 typedef struct {
@@ -248,9 +249,45 @@ static char *split_pathname(char* path)
   }
   return ++tok;
 }
+static apr_status_t file_perms_set_recursive(request_rec*rec,\
+                       const char* dirname, apr_fileperms_t dperms, apr_fileperms_t fperms)
+{
+  char* fname;
+  apr_finfo_t finfo;
+  apr_dir_t* dir;
+  apr_status_t status = apr_dir_open(&dir, dirname, rec->pool);
+  if(status!=APR_SUCCESS) return status;
+
+  while((status=apr_dir_read(&finfo, APR_FINFO_NAME|APR_FINFO_TYPE, dir))==APR_SUCCESS) {
+    if((strcmp(finfo.name, ".")==0) || (strcmp(finfo.name, "..")==0)) continue;
+    fname = apr_pstrcat(rec->pool, dirname, "/", finfo.name, NULL);
+    switch(finfo.filetype) {
+    case APR_DIR:
+      status = file_perms_set_recursive(rec, fname, dperms, fperms);
+      if(status==APR_SUCCESS) {
+        status = apr_file_perms_set(fname, dperms);
+      }
+      break;
+    case APR_REG:
+      status = apr_file_perms_set(fname, fperms);
+      break;
+    case APR_LNK:
+    default:
+      break;
+    }
+    if(status!=APR_SUCCESS) goto FINALLY;
+  }
+  status = APR_SUCCESS;
+
+FINALLY:
+  AP_LOG_DEBUG(rec, "file_perms_set_recursive: status=%d : %s", status, dirname);
+  apr_dir_close(dir);
+  return status;
+}
 
 // mvdir
-static apr_status_t directory_mvdir(request_rec* rec, const char* from_dir, const char* _to_dir, apr_fileperms_t perm)
+static apr_status_t directory_mvdir(request_rec* rec,\
+                      const char* from_dir, const char* _to_dir, apr_fileperms_t perm)
 {
   upload_conf* conf = (upload_conf*)ap_get_module_config(rec->per_dir_config, &upload_module);
   const char* to_dir;
@@ -278,18 +315,18 @@ static apr_status_t directory_mvdir(request_rec* rec, const char* from_dir, cons
 
   // make t_base (base dir of to_dir).
   if((status=apr_dir_make_recursive(tbase, perm, rec->pool))!=APR_SUCCESS) {
-    AP_ERR_RESPONSE(rec, "Mvdir: mkdir(base) failed: %s : %s(%d)\n", tbase, strerror(status), status);
+    AP_ERR_RESPONSE(rec, "Mvdir: mkdir(base) failed: %s : %s(%d)", tbase, strerror(status), status);
     return status;
   }
 
   // move from_dir to to_dir.
   if((status=apr_file_rename(from_dir, to_dir, rec->pool))!=APR_SUCCESS) {
-    AP_ERR_RESPONSE(rec, "Mvdir: move failed: %s=>%s : %s(%d)\n", from_dir, to_dir, strerror(status), status);
+    AP_ERR_RESPONSE(rec, "Mvdir: move failed: %s=>%s : %s(%d)", from_dir, to_dir, strerror(status), status);
     return status;
   }
 
   // change permission.
-  apr_file_perms_set(to_dir, perm);
+  file_perms_set_recursive(rec, to_dir, perm| 0x111, perm& 0x666);
 
   return status;
 }
@@ -329,7 +366,7 @@ static apr_status_t director_control(request_rec* rec, const char* command, cons
       rec->status = HTTP_MOVED_PERMANENTLY;
       apr_table_set(rec->headers_out, "Location", arg1);
     } else {
-      AP_ERR_RESPONSE(rec, "Mvdir failed: %s=>%s : %s(%d)\n", dirname, arg1, strerror(status), status);
+      AP_ERR_RESPONSE(rec, "Mvdir failed: %s=>%s : %s(%d)", dirname, arg1, strerror(status), status);
     }
   } else {
     status = APR_BADARG;
@@ -345,15 +382,14 @@ static int direct_upload_handler(request_rec *rec)
 {
   upload_conf* conf = (upload_conf*)ap_get_module_config(rec->per_dir_config, &upload_module);
   apr_status_t status, success_status;
-  char* filename = rec->uri;
   const char* x_from, *x_dirc;
-  int   u;
  
   if(!conf || !conf->enabled) return DECLINED;
  
   AP_LOG_DEBUG(rec, "Incomming %s Enabled=%d %s", __FUNCTION__, conf->enabled, rec->method);
   AP_LOG_DEBUG(rec, "  url_base=%s dir_base=%s", conf->url_base, conf->dir_base);
   AP_LOG_DEBUG(rec, "  URI=%s", rec->uri);
+  AP_LOG_DEBUG(rec, "  filename/path_info=%s%s", rec->filename, rec->path_info);
   if((rec->method_number & (M_POST|M_PUT))==0) return DECLINED; // Handled 'PUT', 'POST' only.
   if(strcasecmp(rec->handler, "upload")) return DECLINED;
 
@@ -365,21 +401,15 @@ static int direct_upload_handler(request_rec *rec)
   x_dirc = apr_table_get(rec->headers_in, X_DIRCTRL);
   AP_LOG_DEBUG(rec, "  %s=%s, %s=%s", X_LOCATION, x_from, X_DIRCTRL, x_dirc);
 
-  // build filename.
-  u = strlen(conf->url_base);
-  if(strncmp(rec->uri, conf->url_base, u)==0) {
-    filename = apr_pstrcat(rec->pool, conf->dir_base, rec->uri + u, NULL);
-  }
-
   // do request.
   if(x_dirc) {
-    status = director_control(rec, x_dirc, filename);
+    status = director_control(rec, x_dirc, rec->filename);
     success_status = rec->status;
   } else if(x_from) {
-    status = save_to_file_from_url(rec, x_from, filename);
+    status = save_to_file_from_url(rec, x_from, rec->filename);
     success_status = HTTP_CREATED;
   } else {
-    status = save_to_file(rec, filename);
+    status = save_to_file(rec, rec->filename);
     success_status = HTTP_CREATED;
   }
 
