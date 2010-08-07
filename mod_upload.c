@@ -1,3 +1,20 @@
+/* 
+ * Copyright 2010 Toshiyuki Suzumura
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
 #include "httpd.h"
 #include "http_config.h"
 #include "http_protocol.h"
@@ -7,18 +24,21 @@
 #include "apr_lib.h"
 #include "apr_strings.h"
 #include "apr_tables.h"
+#include "ap_mpm.h"
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <errno.h>
- 
+#include <curl/curl.h> 
+
 #define UNSET (-1)
 #define DISABLED (0)
 #define ENABLED (1)
  
 #define UPLOAD "X-Upload-File"
-static const char VERSION[] = "mod_upload/0.1";
+static const char VERSION[] = "mod_upload/0.2";
 static const char X_UPLOAD[] = UPLOAD;
+static const char X_LOCATION[] = "X-Upload-From";
  
 module AP_MODULE_DECLARE_DATA upload_module;
  
@@ -38,25 +58,20 @@ typedef struct {
  
 // Callbacks context.
 typedef struct {
-  upload_conf* conf;
-  char* separator;
-  char* filename;
-  int fd;
+  apr_status_t http_status;
+  apr_status_t file_status;
+  apr_file_t* file;
+  apr_off_t   count;
 } context;
  
- 
-// apr_table_do() callback proc: Copy headers from apache-request to curl-request.
-static int each_headers_proc(void* rec_, const char* key, const char* value)
-{
-  apr_file_t* file = (apr_file_t*)rec_;
-  apr_file_printf(file, "[Header] %s: %s\n", key, value);
-  return TRUE;
-}
  
 //
 // Main functions.
 //
-// Save to tmpfile
+
+//
+// Save to specified file from rec.
+//
 static apr_status_t save_to_file(request_rec* rec, const char* filename)
 {
   apr_file_t* file = NULL;
@@ -67,7 +82,7 @@ static apr_status_t save_to_file(request_rec* rec, const char* filename)
   // get content-length 
   hdr = apr_table_get(rec->headers_in, "Content-Length");
   length = (hdr)? apr_atoi64(hdr): LLONG_MAX;
-  AP_LOG_DEBUG(rec, " Content-Length: %lu", length);
+  AP_LOG_DEBUG(rec, " Content-Length: %llu", length);
 
   // create file.
   status = apr_file_open(&file, filename, APR_WRITE|APR_CREATE|APR_TRUNCATE, APR_FPROT_OS_DEFAULT, rec->pool);
@@ -99,7 +114,7 @@ FINALLY:
   if(file) {
     s_close = apr_file_close(file);
     if(s_close!=APR_SUCCESS) {
-      AP_LOG_ERR(rec, "Failed to close file(%s)(%d).", filename, s_close);
+      AP_LOG_ERR(rec, "Close failed: %s : %s(%d)", filename, strerror(s_close), s_close);
       status = s_close;
     }
   }
@@ -108,10 +123,101 @@ FINALLY:
     ap_rprintf(rec, "Write failed: %s : %s(%d)\n", filename, strerror(status), status);
     AP_LOG_ERR(rec, "Write failed: %s : %s(%d)", filename, strerror(status), status);
   } else {
-    ap_rprintf(rec, "Saved: %s (%lu)\n", filename, count);
-    AP_LOG_DEBUG(rec, "%lu bytes read.", count);
+    ap_rprintf(rec, "Saved: %s (%llu)\n", filename, count);
+    AP_LOG_DEBUG(rec, "%llu bytes read.", count);
   }
   return status;
+}
+
+
+
+//
+// Save to specified file from URL.
+//
+
+// CURL header callback.
+static size_t upload_curl_header_callback(const void* ptr, size_t size, size_t nmemb, void* _context)
+{
+  context* ct = (context*)_context;
+
+  if(strncmp(ptr, "HTTP/1.", sizeof("HTTP/1.")-1)==0) {
+    int mv, status;
+    if(sscanf(ptr, "HTTP/1.%d %d ", &mv, &status)==2 && status!=200) {
+      ct->http_status = status;
+    }
+  }
+  return nmemb;
+}
+
+// CURL write callback.
+static size_t upload_curl_write_callback(const void* ptr, size_t size, size_t nmemb, void* _context)
+{
+  context* ct = (context*)_context;
+  apr_size_t w = size*nmemb;
+
+  ct->file_status = apr_file_write(ct->file, ptr, &w);
+  ct->count += w;
+  return nmemb;
+}
+
+// save to file from URL.
+static apr_status_t save_to_file_from_url(request_rec* rec, const char* url, const char* filename)
+{
+  CURL* curl = curl_easy_init();
+  CURLcode ret = 0;
+  context ct = { .http_status=200, .file_status=APR_SUCCESS, .file=NULL, .count=0 };
+  int threaded_mpm;
+
+  // create file.
+  ct.file_status = apr_file_open(&ct.file, filename, \
+                      APR_WRITE|APR_CREATE|APR_TRUNCATE, APR_FPROT_OS_DEFAULT, rec->pool);
+  if(ct.file_status!=APR_SUCCESS) goto FINALLY;
+
+  // setup curl and request.
+  ap_mpm_query(AP_MPMQ_IS_THREADED, &threaded_mpm);
+  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, threaded_mpm);
+  curl_easy_setopt(curl, CURLOPT_URL, url);
+  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1);
+  curl_easy_setopt(curl, CURLOPT_WRITEHEADER, &ct);
+  curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, upload_curl_header_callback);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ct);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, upload_curl_write_callback);
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, apr_psprintf(rec->pool, "%s %s", VERSION, curl_version()));
+  ap_should_client_block(rec);
+  ret = curl_easy_perform(curl);
+  curl_easy_cleanup(curl);
+ 
+FINALLY:
+  if(ct.file) {
+    apr_status_t s_close = apr_file_close(ct.file);
+    if(s_close!=APR_SUCCESS) {
+      AP_LOG_ERR(rec, "Close failed: %s : %s(%d)", filename, strerror(s_close), s_close);
+      ct.file_status = s_close;
+    }
+    if(ct.file_status!=APR_SUCCESS) {
+      apr_file_remove(filename, rec->pool);
+      ap_rprintf(rec, "Write failed: %s : %s(%d)\n", filename, strerror(ct.file_status), ct.file_status);
+      AP_LOG_ERR(rec, "Write failed: %s : %s(%d)", filename, strerror(ct.file_status), ct.file_status);
+      ct.count = (apr_off_t)-1;
+    }
+  }
+  if(ret!=0) {
+    apr_file_remove(filename, rec->pool);
+    ap_rprintf(rec, "libcurl failed: %s : %d\n", url, ret);
+    AP_LOG_ERR(rec, "libcurl failed: %s : %d", url, ret);
+    ct.count = (apr_off_t)-1;
+  }
+  if(ct.http_status!=200) {
+    apr_file_remove(filename, rec->pool);
+    ap_rprintf(rec, "libcurl HTTP request failed: %s : %d\n", url, ct.http_status);
+    AP_LOG_ERR(rec, "libcurl HTTP request failed: %s : %d", url, ct.http_status);
+    rec->status = ct.http_status;
+    ct.file_status = -1;
+  } else if(ct.count!=(apr_off_t)-1) {
+    ap_rprintf(rec, "Saved: %s (%llu)\n", filename, ct.count);
+    AP_LOG_DEBUG(rec, "%llu bytes read.", ct.count);
+  }
+  return ct.file_status;
 }
  
  
@@ -121,6 +227,7 @@ static int direct_upload_handler(request_rec *rec)
   upload_conf* conf = (upload_conf*)ap_get_module_config(rec->per_dir_config, &upload_module);
   apr_status_t status = APR_SUCCESS;
   char* filename = rec->uri;
+  const char* x_from;
   int   u;
  
   if(!conf || !conf->enabled) return DECLINED;
@@ -131,14 +238,27 @@ static int direct_upload_handler(request_rec *rec)
   if((rec->method_number & (M_POST|M_PUT))==0) return DECLINED; // Handled 'PUT', 'POST' only.
   if(strcasecmp(rec->handler, "upload")) return DECLINED;
  
+  // get 'X-Upload-From'.
+  x_from = apr_table_get(rec->headers_in, X_LOCATION);
+  AP_LOG_DEBUG(rec, "  %s=%s", X_LOCATION, x_from);
   rec->content_type = "plain/text";
+
+  // build filename.
   u = strlen(conf->url_base);
   if(strncmp(rec->uri, conf->url_base, u)==0) {
     filename = apr_pstrcat(rec->pool, conf->dir_base, rec->uri + u, NULL);
   }
-  status = save_to_file(rec, filename);
+
+  // save to file.
+  if(x_from) {
+    status = save_to_file_from_url(rec, x_from, filename);
+  } else {
+    status = save_to_file(rec, filename);
+  }
 
   switch(status) {
+  case -1:
+    break;  // path thru.
   case OK:
     rec->status = HTTP_CREATED;
     break;
@@ -156,20 +276,6 @@ static int direct_upload_handler(request_rec *rec)
   return OK;
 }
  
- 
-// apr_table_do() callback proc: Copy headers from apache-request to curl-request.
-static int each_headers_proc_0(void* _rec, const char* key, const char* value)
-{
-  request_rec *rec = (request_rec*)_rec;
-  AP_LOG_DEBUG(rec, "++ %s: %s", key, value);
-  return TRUE;
-}
- 
-static int dump_headers(request_rec *rec)
-{
-  apr_table_do(each_headers_proc_0, rec, rec->headers_in, NULL);
-  return OK;
-}
  
 //
 // Configurators, and Register.

@@ -1,13 +1,27 @@
-mod_upload 0.01
+mod_upload 0.2
 
 This module adds upload handler to Apache/2.x.
 
 To install:
-  # apxs -i -c -Wc,-Wall -Wc,-g -Wc,-O2 mod_upload.c
+  make install
 
-To enable the module:
-  SetHandler Upload
-  Upload on
-  Upload_base /url_from /filesystem_to
+Usage:
+  * Enable the module:
+      SetHandler Upload
+      Upload on
+      Upload_base /url_from /filesystem_to
+  For example, see upload.conf for CentOS, upload.conf.solaris for OpenSolaris.
 
-  For example, see upload.conf for OpenSolaris.
+  * File upload into /filesystem_to/path_to_file
+      PUT /url_from/path_to_file
+      <file body>
+    or
+      POST /url_from/path_to_file
+      <file body>
+
+  * File transfer from specified URL into /filesystem_to/path_to_file
+      PUT /url_from/path_to_file
+      X-Upload-From: URL
+    or
+      POST /url_from/path_to_file
+      X-Upload-From: URL
