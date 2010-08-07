@@ -24,6 +24,7 @@
 #include "apr_lib.h"
 #include "apr_strings.h"
 #include "apr_tables.h"
+#include "apr_file_io.h"
 #include "ap_mpm.h"
 #include <unistd.h>
 #include <sys/types.h>
@@ -36,9 +37,10 @@
 #define ENABLED (1)
  
 #define UPLOAD "X-Upload-File"
-static const char VERSION[] = "mod_upload/0.2";
+static const char VERSION[] = "mod_upload/0.3";
 static const char X_UPLOAD[] = UPLOAD;
 static const char X_LOCATION[] = "X-Upload-From";
+static const char X_DIRCTRL[] = "X-Upload-DirCtrl";
  
 module AP_MODULE_DECLARE_DATA upload_module;
  
@@ -46,6 +48,9 @@ module AP_MODULE_DECLARE_DATA upload_module;
 #define AP_LOG_INFO(rec, fmt, ...) ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, rec, "[upload] " fmt, ##__VA_ARGS__)
 #define AP_LOG_WARN(rec, fmt, ...) ap_log_rerror(APLOG_MARK, APLOG_WARNING,0, rec, "[upload] " fmt, ##__VA_ARGS__)
 #define AP_LOG_ERR(rec, fmt, ...) ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, rec, "[upload] " fmt, ##__VA_ARGS__)
+#define AP_ERR_RESPONSE(rec, fmt, ...) \
+                ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, rec, "[upload] " fmt, ##__VA_ARGS__); \
+                ap_rprintf(rec, fmt, ##__VA_ARGS__)
  
 // Config store.
 typedef struct {
@@ -120,8 +125,7 @@ FINALLY:
   }
   if(status!=APR_SUCCESS) {
     apr_file_remove(filename, rec->pool);
-    ap_rprintf(rec, "Write failed: %s : %s(%d)\n", filename, strerror(status), status);
-    AP_LOG_ERR(rec, "Write failed: %s : %s(%d)", filename, strerror(status), status);
+    AP_ERR_RESPONSE(rec, "Write failed: %s : %s(%d)", filename, strerror(status), status);
   } else {
     ap_rprintf(rec, "Saved: %s (%llu)\n", filename, count);
     AP_LOG_DEBUG(rec, "%llu bytes read.", count);
@@ -196,21 +200,18 @@ FINALLY:
     }
     if(ct.file_status!=APR_SUCCESS) {
       apr_file_remove(filename, rec->pool);
-      ap_rprintf(rec, "Write failed: %s : %s(%d)\n", filename, strerror(ct.file_status), ct.file_status);
-      AP_LOG_ERR(rec, "Write failed: %s : %s(%d)", filename, strerror(ct.file_status), ct.file_status);
+      AP_ERR_RESPONSE(rec, "Write failed: %s : %s(%d)", filename, strerror(ct.file_status), ct.file_status);
       ct.count = (apr_off_t)-1;
     }
   }
   if(ret!=0) {
     apr_file_remove(filename, rec->pool);
-    ap_rprintf(rec, "libcurl failed: %s : %d\n", url, ret);
-    AP_LOG_ERR(rec, "libcurl failed: %s : %d", url, ret);
+    AP_ERR_RESPONSE(rec, "libcurl failed: %s : %d", url, ret);
     ct.count = (apr_off_t)-1;
   }
   if(ct.http_status!=200) {
     apr_file_remove(filename, rec->pool);
-    ap_rprintf(rec, "libcurl HTTP request failed: %s : %d\n", url, ct.http_status);
-    AP_LOG_ERR(rec, "libcurl HTTP request failed: %s : %d", url, ct.http_status);
+    AP_ERR_RESPONSE(rec, "libcurl HTTP request failed: %s : %d", url, ct.http_status);
     rec->status = ct.http_status;
     ct.file_status = -1;
   } else if(ct.count!=(apr_off_t)-1) {
@@ -219,15 +220,133 @@ FINALLY:
   }
   return ct.file_status;
 }
- 
+
+
+//
+// directory control.
+//
+
+// normalize pathname
+static apr_status_t normalize_pathname(request_rec* rec, char** path)
+{
+  char* newpath = "", *tok, *toklast;
+
+  tok = apr_strtok(*path, "/", &toklast);
+  while(tok!=NULL) {
+    newpath = apr_pstrcat(rec->pool, newpath, "/", tok, NULL);
+    tok = apr_strtok(NULL, "/", &toklast);
+  }
+  *path = newpath;
+  return (*newpath=='\0')? APR_EBADPATH: APR_SUCCESS;
+}
+static char *split_pathname(char* path)
+{
+  char* tok = strrchr(path, '/');
+  if(tok>path) {
+    *(tok++) = '\0';
+    return tok;
+  }
+  return ++tok;
+}
+
+// mvdir
+static apr_status_t directory_mvdir(request_rec* rec, const char* from_dir, const char* _to_dir, apr_fileperms_t perm)
+{
+  upload_conf* conf = (upload_conf*)ap_get_module_config(rec->per_dir_config, &upload_module);
+  const char* to_dir;
+  char* fbase, *fname, *tbase, *tname;
+  apr_status_t status;
+  int u;
+
+  if((from_dir==NULL) || (_to_dir==NULL)) return APR_EBADPATH;
+
+  // build replaced 'to_dir'.
+  u = strlen(conf->url_base);
+  if(strncmp(_to_dir, conf->url_base, u)==0) {
+    to_dir = apr_pstrcat(rec->pool, conf->dir_base, _to_dir + u, NULL);
+  } else {
+    return EACCES;
+  }
+
+  fbase = apr_pstrdup(rec->pool, from_dir);
+  if(normalize_pathname(rec, &fbase)!=APR_SUCCESS) return APR_EBADPATH;
+  if(*(fname=split_pathname(fbase))=='\0') return APR_EBADPATH;
+  
+  tbase = apr_pstrdup(rec->pool, to_dir);
+  if(normalize_pathname(rec, &tbase)!=APR_SUCCESS) return APR_EBADPATH;
+  if(*(tname=split_pathname(tbase))=='\0') return APR_EBADPATH;
+
+  // make t_base (base dir of to_dir).
+  if((status=apr_dir_make_recursive(tbase, perm, rec->pool))!=APR_SUCCESS) {
+    AP_ERR_RESPONSE(rec, "Mvdir: mkdir(base) failed: %s : %s(%d)\n", tbase, strerror(status), status);
+    return status;
+  }
+
+  // move from_dir to to_dir.
+  if((status=apr_file_rename(from_dir, to_dir, rec->pool))!=APR_SUCCESS) {
+    AP_ERR_RESPONSE(rec, "Mvdir: move failed: %s=>%s : %s(%d)\n", from_dir, to_dir, strerror(status), status);
+    return status;
+  }
+
+  // change permission.
+  apr_file_perms_set(to_dir, perm);
+
+  return status;
+}
+
+// command exec
+static apr_status_t director_control(request_rec* rec, const char* command, const char* dirname)
+{
+  apr_status_t status = APR_SUCCESS;
+  apr_fileperms_t perm = APR_FPROT_OS_DEFAULT;
+  char* toklast;
+  char* str = apr_pstrdup(rec->pool, command);
+  char* cmd = apr_strtok(str, "; ", &toklast);
+  char* arg1 = apr_strtok(NULL, "; ", &toklast);
+  char* arg2 = apr_strtok(NULL, "; ", &toklast);
+  int t;
+
+  AP_LOG_DEBUG(rec, "director_control: %s => %s, '%s', '%s'", command, cmd, arg1, arg2);
+  if(strcasecmp(cmd, "mkdir")==0) {
+    if((arg1!=NULL) && (t=apr_strtoi64(arg1, NULL, 16))!=0) perm = t;
+    if((status=apr_dir_make_recursive(dirname, APR_FPROT_OS_DEFAULT, rec->pool))==APR_SUCCESS) {
+      apr_file_perms_set(dirname, perm);
+      rec->status = HTTP_CREATED;
+    } else {
+      AP_ERR_RESPONSE(rec, "Mkdir failed: %s : %s(%d)\n", dirname, strerror(status), status);
+    }
+  } else
+  if(strcasecmp(cmd, "rmdir")==0) {
+    if((status=apr_dir_remove(dirname, rec->pool))==APR_SUCCESS) {
+      rec->status = HTTP_OK;
+    } else {
+      AP_ERR_RESPONSE(rec, "Rmdir failed: %s : %s(%d)\n", dirname, strerror(status), status);
+    }
+  } else
+  if(strcasecmp(cmd, "mvdir")==0) {
+    if((arg2!=NULL) && (t=apr_strtoi64(arg2, NULL, 16))!=0) perm = t;
+    if((status=directory_mvdir(rec, dirname, arg1, perm))==APR_SUCCESS) {
+      rec->status = HTTP_MOVED_PERMANENTLY;
+      apr_table_set(rec->headers_out, "Location", arg1);
+    } else {
+      AP_ERR_RESPONSE(rec, "Mvdir failed: %s=>%s : %s(%d)\n", dirname, arg1, strerror(status), status);
+    }
+  } else {
+    status = APR_BADARG;
+    AP_ERR_RESPONSE(rec, "Invalid command: %s", command);
+  }
+
+  return status;
+}
+
  
 // Direct upload handler
 static int direct_upload_handler(request_rec *rec)
 {
   upload_conf* conf = (upload_conf*)ap_get_module_config(rec->per_dir_config, &upload_module);
-  apr_status_t status = APR_SUCCESS;
+  apr_status_t status, success_status;
   char* filename = rec->uri;
-  const char* x_from;
+  const char* x_from, *x_dirc;
   int   u;
  
   if(!conf || !conf->enabled) return DECLINED;
@@ -237,11 +356,14 @@ static int direct_upload_handler(request_rec *rec)
   AP_LOG_DEBUG(rec, "  URI=%s", rec->uri);
   if((rec->method_number & (M_POST|M_PUT))==0) return DECLINED; // Handled 'PUT', 'POST' only.
   if(strcasecmp(rec->handler, "upload")) return DECLINED;
- 
-  // get 'X-Upload-From'.
-  x_from = apr_table_get(rec->headers_in, X_LOCATION);
-  AP_LOG_DEBUG(rec, "  %s=%s", X_LOCATION, x_from);
+
+  // setup content-type of response.
   rec->content_type = "plain/text";
+ 
+  // get extent headers: 'X-Upload-From', 'X-Upload-DirCtrl'.
+  x_from = apr_table_get(rec->headers_in, X_LOCATION);
+  x_dirc = apr_table_get(rec->headers_in, X_DIRCTRL);
+  AP_LOG_DEBUG(rec, "  %s=%s, %s=%s", X_LOCATION, x_from, X_DIRCTRL, x_dirc);
 
   // build filename.
   u = strlen(conf->url_base);
@@ -249,26 +371,36 @@ static int direct_upload_handler(request_rec *rec)
     filename = apr_pstrcat(rec->pool, conf->dir_base, rec->uri + u, NULL);
   }
 
-  // save to file.
-  if(x_from) {
+  // do request.
+  if(x_dirc) {
+    status = director_control(rec, x_dirc, filename);
+    success_status = rec->status;
+  } else if(x_from) {
     status = save_to_file_from_url(rec, x_from, filename);
+    success_status = HTTP_CREATED;
   } else {
     status = save_to_file(rec, filename);
+    success_status = HTTP_CREATED;
   }
 
   switch(status) {
   case -1:
     break;  // path thru.
   case OK:
-    rec->status = HTTP_CREATED;
-    break;
-  case EEXIST:
-  case ENOTDIR:
-    rec->status = HTTP_BAD_REQUEST;
+    rec->status = success_status;
     break;
   case EACCES:
     rec->status = HTTP_FORBIDDEN;
     break;
+  case ENOENT:
+    rec->status = HTTP_NOT_FOUND;
+    break;
+  case ENOTEMPTY:
+    rec->status = HTTP_CONFLICT;
+    break;
+  case APR_EBADPATH:
+  case EEXIST:
+  case ENOTDIR:
   default:
     rec->status = HTTP_BAD_REQUEST;
     break;

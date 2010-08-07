@@ -1,27 +1,52 @@
-mod_upload 0.2
+mod_upload 0.3
 
 This module adds upload handler to Apache/2.x.
 
 To install:
-  make install
+  sudo make install
 
 Usage:
   * Enable the module:
       SetHandler Upload
       Upload on
       Upload_base /url_from /filesystem_to
+
   For example, see upload.conf for CentOS, upload.conf.solaris for OpenSolaris.
 
-  * File upload into /filesystem_to/path_to_file
-      PUT /url_from/path_to_file
-      <file body>
-    or
-      POST /url_from/path_to_file
-      <file body>
 
-  * File transfer from specified URL into /filesystem_to/path_to_file
-      PUT /url_from/path_to_file
+  * File upload into "/filesystem_to/path_to_file".
+      (PUT|POST) /url_from/path_to_file
+      <file body>
+    Return "201 Created" when succeed.
+
+
+  * File transfer from specified URL into "/filesystem_to/path_to_file".
+      (PUT|POST) /url_from/path_to_file
       X-Upload-From: URL
+    Return "201 Created" when succeed.
+
+
+  * Make "/filesystem_to/path_to_dir/" directory.
+      (PUT|POST) /url_from/path_to_dir/
+      X-Upload-DirCtrl: mkdir
     or
-      POST /url_from/path_to_file
-      X-Upload-From: URL
+      (PUT|POST) /url_from/path_to_dir/
+      X-Upload-DirCtrl: mkdir;775
+    '775' is directory permission.
+    Return "201 Created" when succeed.
+
+
+  * Remove "/filesystem_to/path_to_dir/" directory.
+      (PUT|POST) /url_from/path_to_dir/
+      X-Upload-DirCtrl: rmdir
+    Return "200 OK" when succeed.
+
+
+  * Move "/filesystem_to/path_to_dir1/" to "/filesystem_to/path_to_dir2/".
+      (PUT|POST) /url_from/path_to_dir1/
+      X-Upload-DirCtrl: mvdir;/url_from/path_to_dir2/
+    or
+      (PUT|POST) /url_from/path_to_dir1/
+      X-Upload-DirCtrl: mvdir;/url_from/path_to_dir2/;775
+    '775' is directory permission.
+    Return "301 Moved Permanently" when succeed.

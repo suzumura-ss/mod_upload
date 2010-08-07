@@ -10,8 +10,8 @@ all: $(TARGET)
 $(TARGET): $(SRC) $(HEADERS)
 	$(APXS) -c $(APXS_FLAGS) $(SRC)
 
-install: $(TARGET)
-	sudo $(APXS) -i -c $(APXS_FLAGS) $(SRC)
+install:: $(SRC) $(HEADERS)
+	$(APXS) -i -c $(APXS_FLAGS) $(SRC)
 
 clean:
 	@rm $(TARGET:slo=*o) $(TARGET:slo=*a)
