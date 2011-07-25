@@ -88,7 +88,7 @@ static apr_status_t save_to_file(request_rec* rec, const char* filename)
   // get content-length 
   hdr = apr_table_get(rec->headers_in, "Content-Length");
   length = (hdr)? apr_atoi64(hdr): LLONG_MAX;
-  AP_LOG_DEBUG(rec, " Content-Length: %lu", length);
+  AP_LOG_DEBUG(rec, " Content-Length: %llu", length);
 
   // create file.
   status = apr_file_open(&file, filename, APR_WRITE|APR_CREATE|APR_TRUNCATE, APR_FPROT_OS_DEFAULT, rec->pool);
@@ -103,7 +103,7 @@ static apr_status_t save_to_file(request_rec* rec, const char* filename)
     while(((bytes=ap_get_client_block(rec, buf, sizeof(buf)))>0) && (length>count)) {
       apr_size_t  wr = 0;
       if(count+bytes>length) {
-        AP_LOG_WARN(rec, "Illegal Content-Length : %lu", length);
+        AP_LOG_WARN(rec, "Illegal Content-Length : %llu", length);
         bytes = length - count;
       }
       while(wr<bytes) {
@@ -128,8 +128,8 @@ FINALLY:
     apr_file_remove(filename, rec->pool);
     AP_ERR_RESPONSE(rec, "Write failed: %s : %s(%d)", filename, strerror(status), status);
   } else {
-    ap_rprintf(rec, "Saved: %s (%lu)\n", filename, count);
-    AP_LOG_DEBUG(rec, "%lu bytes read.", count);
+    ap_rprintf(rec, "Saved: %s (%llu)\n", filename, count);
+    AP_LOG_DEBUG(rec, "%llu bytes read.", count);
   }
   return status;
 }
@@ -216,8 +216,8 @@ FINALLY:
     rec->status = ct.http_status;
     ct.file_status = -1;
   } else if(ct.count!=(apr_off_t)-1) {
-    ap_rprintf(rec, "Saved: %s (%lu)\n", filename, ct.count);
-    AP_LOG_DEBUG(rec, "%lu bytes read.", ct.count);
+    ap_rprintf(rec, "Saved: %s (%llu)\n", filename, ct.count);
+    AP_LOG_DEBUG(rec, "%llu bytes read.", ct.count);
   }
   return ct.file_status;
 }
@@ -396,7 +396,7 @@ static int direct_upload_handler(request_rec *rec)
   AP_LOG_DEBUG(rec, "  url_base=%s dir_base=%s", conf->url_base, conf->dir_base);
   AP_LOG_DEBUG(rec, "  URI=%s", rec->uri);
   AP_LOG_DEBUG(rec, "  filename/path_info=%s%s", rec->filename, rec->path_info);
-  if((rec->method_number!=M_POST) && (rec->method_number!=M_PUT)==0) return DECLINED; // Handled 'PUT', 'POST' only.
+  if((rec->method_number!=M_POST) && (rec->method_number!=M_PUT)) return DECLINED; // Handled 'PUT', 'POST' only.
   if(strcasecmp(rec->handler, "upload")) return DECLINED;
 
   // setup content-type of response.
